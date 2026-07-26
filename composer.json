@@ -1,0 +1,30 @@
+{
+    "name": "roundcube/passkeys",
+    "type": "roundcube-plugin",
+    "description": "Optional passwordless passkey (WebAuthn/FIDO2) authentication for Roundcube. Each user may enrol one or more passkeys and sign in without a password; the standard username/password login and any 2FA plugins remain fully functional.",
+    "license": "GPL-3.0-or-later",
+    "version": "1.0.0",
+    "authors": [
+        {
+            "name": "Matthias Kerstner",
+            "role": "Lead"
+        }
+    ],
+    "require": {
+        "php": ">=8.1",
+        "roundcube/plugin-installer": "~0.3.5",
+        "lbuchs/webauthn": "^2.2"
+    },
+    "autoload": {
+        "classmap": [
+            "passkeys.php",
+            "lib/"
+        ]
+    },
+    "extra": {
+        "roundcube": {
+            "min-version": "1.6.0",
+            "sql-dir": "SQL"
+        }
+    }
+}
