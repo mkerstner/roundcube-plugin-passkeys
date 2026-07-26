@@ -1,0 +1,48 @@
+<?php
+
+/*
+ +-----------------------------------------------------------------------+
+ | Configuration for the Passkeys plugin                                 |
+ |                                                                       |
+ | Copy this file to config.inc.php and adjust as needed. Every option   |
+ | has a safe default, so an empty config.inc.php is a valid setup.      |
+ +-----------------------------------------------------------------------+
+*/
+
+// Relying Party name shown in the operating-system / browser passkey prompt.
+// Defaults to the configured 'product_name' (usually "Roundcube Webmail").
+$config['passkeys_rp_name'] = null;
+
+// Relying Party ID. MUST be the registration-able domain the users reach
+// Roundcube on (e.g. "mail.example.com" or the parent "example.com").
+// Leave null to derive it from the current HTTP host. If your users reach
+// Roundcube under several hostnames, pin this to one of them.
+$config['passkeys_rp_id'] = null;
+
+// Require user verification (PIN, fingerprint, face, ...) for both enrolment
+// and login. Strongly recommended; disables silent/presence-only assertions.
+$config['passkeys_require_uv'] = true;
+
+// Keep the standard username/password login form available alongside the
+// "Sign in with a passkey" button. Strongly recommended so a lost or broken
+// authenticator can never lock a user out. Set to false only if every user
+// is guaranteed a working recovery path by other means.
+$config['passkeys_allow_password_login'] = true;
+
+// WebAuthn ceremony timeout in seconds.
+$config['passkeys_timeout'] = 60;
+
+// What to do when a user's browser/authenticator does not support the PRF
+// (hmac-secret) extension that passwordless login relies on:
+//   'reject'        - refuse enrolment and tell the user their device is not
+//                     supported (keeps the plugin's "passwordless" promise).
+//   'second_factor' - still enrol the credential, but only as an optional
+//                     second factor after password login (no passwordless).
+$config['passkeys_on_no_prf'] = 'reject';
+
+// Accepted attestation statement formats. The default list matches what the
+// bundled WebAuthn library understands. Restrict this only if you enforce a
+// specific attestation policy.
+$config['passkeys_formats'] = [
+    'none', 'packed', 'tpm', 'android-key', 'android-safetynet', 'apple', 'fido-u2f',
+];
