@@ -27,8 +27,8 @@ if (window.rcmail) {
             });
         }
 
-        if (rcmail.env.task == 'login' && rcmail.passkeys_supported()) {
-            $('#passkeys-login-button').show();
+        if (rcmail.env.task == 'login') {
+            rcmail.passkeys_init_login();
         }
     });
 }
@@ -188,6 +188,18 @@ rcube_webmail.prototype.passkeys_remove_row = function (cred_id) {
 /* ------------------------------------------------------------------ *
  *  Passwordless login                                                 *
  * ------------------------------------------------------------------ */
+
+/**
+ * Reveal the passkey divider and button on the login form. They are rendered
+ * (hidden) by the server via the loginform_content hook on every skin; here we
+ * only unhide them when the browser actually supports WebAuthn, so the "or sign
+ * in using passkeys" divider never shows without a working button.
+ */
+rcube_webmail.prototype.passkeys_init_login = function () {
+    if (this.passkeys_supported()) {
+        document.body.className += (document.body.className ? ' ' : '') + 'passkeys-available';
+    }
+};
 
 /**
  * Kick off the passwordless login ceremony: fetch an assertion challenge.

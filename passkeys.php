@@ -66,17 +66,21 @@ class passkeys extends rcube_plugin
             $this->register_action('plugin.passkeys.rename', [$this, 'action_rename']);
 
             $this->include_script('passkeys.js');
-            $this->include_stylesheet($this->local_skin_path() . '/passkeys.css');
+            // Skin-independent stylesheet (works on any skin, not just elastic).
+            $this->include_stylesheet('passkeys.css');
         } elseif ($this->rc->task == 'login') {
             // The login page short-circuits to rendering the login template for
             // unauthenticated requests (index.php), so plugin AJAX actions never
             // reach the normal dispatcher. We handle them in the startup hook,
             // which runs before that short-circuit.
             $this->add_hook('startup', [$this, 'login_startup']);
-            $this->add_hook('template_container', [$this, 'login_container']);
+            // Add the passkey button to the login form itself, right below the
+            // standard Login button. loginform_content is a core hook and the
+            // form is rendered by core, so this works on every skin.
+            $this->add_hook('loginform_content', [$this, 'login_form_content']);
 
             $this->include_script('passkeys.js');
-            $this->include_stylesheet($this->local_skin_path() . '/passkeys.css');
+            $this->include_stylesheet('passkeys.css');
         }
     }
 
@@ -98,24 +102,31 @@ class passkeys extends rcube_plugin
     }
 
     /**
-     * Inject the "Sign in with a passkey" button into the login form footer.
-     * The button is hidden until the client script confirms WebAuthn support.
+     * Add a divider and the "Sign in with a passkey" button to the login form,
+     * immediately below the standard Login button. Core renders the login form
+     * (and the buttons added here) the same way for every skin, so no skin
+     * template changes are needed. The button stays hidden until the client
+     * script confirms WebAuthn support.
      */
-    public function login_container($args)
+    public function login_form_content($content)
     {
-        if ($args['name'] === 'loginfooter') {
-            $button = html::tag('button', [
+        // "──── or sign in using passkeys ────"
+        $content['buttons']['passkeys_sep'] = [
+            'outterclass' => 'passkeys-separator',
+            'content' => html::tag('span', null, rcube::Q($this->gettext('orsigninwithpasskey'))),
+        ];
+
+        $content['buttons']['passkeys_login'] = [
+            'outterclass' => 'passkeys-login-row',
+            'content' => html::tag('button', [
                 'type' => 'button',
                 'id' => 'passkeys-login-button',
-                'class' => 'btn btn-secondary button passkeys-login',
-                'style' => 'display:none',
+                'class' => 'button passkeys-login',
                 'onclick' => 'return rcmail.passkeys_login()',
-            ], rcube::Q($this->gettext('loginwithpasskey')));
+            ], rcube::Q($this->gettext('loginwithpasskey'))),
+        ];
 
-            $args['content'] = ($args['content'] ?? '') . html::div(['id' => 'passkeys-login'], $button);
-        }
-
-        return $args;
+        return $content;
     }
 
     /**

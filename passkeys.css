@@ -1,0 +1,68 @@
+/*
+ * Passkeys plugin styles — skin-independent.
+ *
+ * Loaded from the plugin root (not a skin folder) so the plugin works on any
+ * skin, including ones that do not inherit from elastic.
+ */
+
+/* Settings: credential list */
+#passkeys-list {
+    width: 100%;
+    margin-bottom: 1rem;
+}
+
+#passkeys-list td.actions {
+    text-align: right;
+    white-space: nowrap;
+}
+
+#passkeys-list td.name {
+    font-weight: bold;
+}
+
+#passkeys-list td.passkeys-empty {
+    text-align: center;
+    font-style: italic;
+    opacity: 0.7;
+}
+
+.formcontent .hint {
+    margin-bottom: 1rem;
+}
+
+/* Login page: divider + "Sign in with a passkey" button.
+   Hidden by default; revealed only when the client confirms WebAuthn support
+   (body.passkeys-available), so the divider never appears without a button. */
+p.passkeys-separator,
+p.passkeys-login-row {
+    display: none;
+}
+
+body.passkeys-available p.passkeys-separator {
+    display: flex;
+    align-items: center;
+    text-align: center;
+    margin: 0.75rem 0;
+    opacity: 0.7;
+    font-size: 0.9em;
+}
+
+body.passkeys-available p.passkeys-login-row {
+    display: block;
+    margin-top: 0.25rem;
+}
+
+p.passkeys-separator::before,
+p.passkeys-separator::after {
+    content: "";
+    flex: 1 1 auto;
+    border-top: 1px solid currentColor;
+    opacity: 0.35;
+    margin: 0 0.6em;
+}
+
+#passkeys-login-button {
+    width: 100%;
+    padding: 0.5em 1em;
+    cursor: pointer;
+}

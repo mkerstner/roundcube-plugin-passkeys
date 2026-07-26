@@ -28,6 +28,24 @@ reasonably modern browser (Chrome/Edge 116+, Safari 18+, recent Firefox) and
 a PRF-capable authenticator. See `passkeys_on_no_prf` in the configuration
 for how unsupported devices are handled.
 
+## Skins
+
+The plugin is skin-independent and needs no per-skin files:
+
+- **Styles** are loaded from the plugin root (`passkeys.css`), not from a skin
+  folder, so they apply on any skin — including skins that do not inherit from
+  `elastic`.
+- **The "Sign in with a passkey" button** is added to the login form via the
+  core `loginform_content` hook, so it renders — with an "or sign in using
+  passkeys" divider — directly below the standard Login button. Because the
+  login form (and these extra buttons) are rendered by Roundcube core, not by
+  the skin, this placement is identical on every skin with no skin template
+  changes. The divider and button are hidden until the client script confirms
+  the browser supports WebAuthn (`body.passkeys-available`).
+
+So **nothing extra is required for any skin**. The credential-management page in
+Settings uses core templates and needs no skin work either.
+
 ## Requirements
 
 - Roundcube with PHP >= 8.1 (`ext-openssl`, `ext-mbstring`, `ext-sodium`).

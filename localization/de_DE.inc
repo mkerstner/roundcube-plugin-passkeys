@@ -21,6 +21,7 @@ $labels['passkeyneverused'] = 'Nie';
 $labels['unnamedpasskey'] = 'Passkey';
 $labels['passkeynameprompt'] = 'Name für diesen Passkey:';
 $labels['loginwithpasskey'] = 'Mit Passkey anmelden';
+$labels['orsigninwithpasskey'] = 'oder mit Passkey anmelden';
 
 $messages = [];
 $messages['passkeyadded'] = 'Passkey erfolgreich hinzugefügt.';
