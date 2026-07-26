@@ -1,9 +1,8 @@
 {
-    "name": "passkeys",
+    "name": "mkerstner/passkeys",
     "type": "roundcube-plugin",
     "description": "Optional passwordless passkey (WebAuthn/FIDO2) authentication for Roundcube. Each user may enrol one or more passkeys and sign in without a password; the standard username/password login and any 2FA plugins remain fully functional.",
     "license": "GPL-3.0-or-later",
-    "version": "1.0.0",
     "authors": [
         {
             "name": "Matthias Kerstner",
