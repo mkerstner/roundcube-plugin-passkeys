@@ -23,3 +23,13 @@
 .formcontent .hint {
     margin-bottom: 1rem;
 }
+
+/* Login page */
+#passkeys-login {
+    margin-top: 1rem;
+    text-align: center;
+}
+
+#passkeys-login-button {
+    width: 100%;
+}

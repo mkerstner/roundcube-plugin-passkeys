@@ -1,14 +1,20 @@
 /**
  * Client script for the Passkeys plugin.
  *
- * Phase 2: Settings management (list + remove) and the WebAuthn registration
- * ceremony ("add a passkey"). The passwordless login ceremony is added in a
- * later phase.
+ * Settings task: list/remove passkeys and the WebAuthn registration ceremony,
+ * including wrapping the IMAP password with a key derived from the passkey
+ * (PRF extension).
+ *
+ * Login task: the "Sign in with a passkey" ceremony — assert, unwrap the
+ * password client-side, then submit the standard login form so the normal
+ * password/2FA path completes the sign-in.
  */
 
 if (window.rcmail) {
     rcmail.addEventListener('init', function () {
-        if (rcmail.env.task == 'settings' && /^plugin\.passkeys/.test(rcmail.env.action || '')) {
+        var action = rcmail.env.action || '';
+
+        if (rcmail.env.task == 'settings' && /^plugin\.passkeys/.test(action)) {
             rcmail.register_command('plugin.passkeys.add', function () {
                 rcmail.passkeys_add();
             }, true);
@@ -20,6 +26,10 @@ if (window.rcmail) {
                 rcmail.passkeys_remove($(this).attr('data-passkeys-remove'));
             });
         }
+
+        if (rcmail.env.task == 'login' && rcmail.passkeys_supported()) {
+            $('#passkeys-login-button').show();
+        }
     });
 }
 
@@ -27,12 +37,17 @@ if (window.rcmail) {
  * Whether this browser can do WebAuthn at all.
  */
 rcube_webmail.prototype.passkeys_supported = function () {
-    return !!(window.PublicKeyCredential && navigator.credentials && navigator.credentials.create);
+    return !!(window.PublicKeyCredential && navigator.credentials
+        && navigator.credentials.create && navigator.credentials.get
+        && window.crypto && window.crypto.subtle);
 };
 
+/* ------------------------------------------------------------------ *
+ *  Enrolment (Settings)                                               *
+ * ------------------------------------------------------------------ */
+
 /**
- * Start enrolling a new passkey: fetch a registration challenge from the
- * server. The ceremony continues in passkeys_create().
+ * Start enrolling a new passkey: fetch a registration challenge.
  */
 rcube_webmail.prototype.passkeys_add = function () {
     if (!this.passkeys_supported()) {
@@ -44,67 +59,83 @@ rcube_webmail.prototype.passkeys_add = function () {
 };
 
 /**
- * Server callback: run navigator.credentials.create() with the given options
- * and submit the result back for validation and storage.
+ * Server callback: run navigator.credentials.create(), derive the PRF secret,
+ * wrap the IMAP password with it, and submit everything for storage.
  *
- * @param {object} args WebAuthn creation options ({publicKey: {...}}) with
- *                      base64url-encoded challenge and ids.
+ * @param {object} data {args, prf_salt, password, on_no_prf}
  */
-rcube_webmail.prototype.passkeys_create = function (args) {
+rcube_webmail.prototype.passkeys_create = function (data) {
     var ref = this;
+    var args = data.args;
+    var salt = this.passkeys_b64url_to_buf(data.prf_salt);
+    var password = data.password;
+    var on_no_prf = data.on_no_prf || 'reject';
 
     try {
         args.publicKey.challenge = this.passkeys_b64url_to_buf(args.publicKey.challenge);
         args.publicKey.user.id = this.passkeys_b64url_to_buf(args.publicKey.user.id);
-
-        (args.publicKey.excludeCredentials || []).forEach(function (cred) {
-            cred.id = ref.passkeys_b64url_to_buf(cred.id);
+        (args.publicKey.excludeCredentials || []).forEach(function (c) {
+            c.id = ref.passkeys_b64url_to_buf(c.id);
         });
+        args.publicKey.extensions = args.publicKey.extensions || {};
+        args.publicKey.extensions.prf = { eval: { first: salt } };
     } catch (e) {
         this.display_message(this.get_label('weberror', 'passkeys'), 'error');
         return;
     }
 
+    var created;
+
     navigator.credentials.create(args)
         .then(function (credential) {
-            var response = credential.response;
+            created = credential;
+            return ref.passkeys_obtain_prf(credential, salt).catch(function () {
+                if (on_no_prf === 'second_factor') {
+                    return null;  // enrol without passwordless capability
+                }
+                throw new Error('no-prf');
+            });
+        })
+        .then(function (prf) {
+            var response = created.response;
             var transports = '';
-
             if (typeof response.getTransports === 'function') {
-                try {
-                    transports = (response.getTransports() || []).join(',');
-                } catch (e) { /* optional */ }
+                try { transports = (response.getTransports() || []).join(','); } catch (e) { /* optional */ }
             }
 
             var label = window.prompt(ref.get_label('passkeynameprompt', 'passkeys'), '');
             if (label === null) {
-                // user cancelled the naming step; the credential was created on
-                // the device but we simply do not store it.
                 ref.display_message(ref.get_label('passkeyaddcancelled', 'passkeys'), 'notice');
                 return;
             }
 
-            ref.http_post('plugin.passkeys.register', {
+            var post = {
                 _clientDataJSON: ref.passkeys_buf_to_b64url(response.clientDataJSON),
                 _attestationObject: ref.passkeys_buf_to_b64url(response.attestationObject),
                 _transports: transports,
                 _label: label.replace(/^\s+|\s+$/g, '')
-            }, ref.set_busy(true, 'loading'));
+            };
+
+            if (!prf) {
+                post._prf_supported = 0;
+                ref.http_post('plugin.passkeys.register', post, ref.set_busy(true, 'loading'));
+                return;
+            }
+
+            return ref.passkeys_wrap(prf, password).then(function (wrapped) {
+                post._wrapped_secret = wrapped.wrapped_secret;
+                post._wrap_iv = wrapped.wrap_iv;
+                post._prf_supported = 1;
+                ref.http_post('plugin.passkeys.register', post, ref.set_busy(true, 'loading'));
+            });
         })
         .catch(function (err) {
-            // NotAllowedError / AbortError means the user cancelled or timed out.
-            if (err && (err.name == 'NotAllowedError' || err.name == 'AbortError')) {
-                ref.display_message(ref.get_label('passkeyaddcancelled', 'passkeys'), 'notice');
-            } else {
-                ref.display_message(ref.get_label('weberror', 'passkeys'), 'error');
-            }
+            ref.passkeys_report_error(err);
         });
 };
 
 /**
  * Ask for confirmation and remove a passkey.
- *
- * @param {string} cred_id base64url credential id
  */
 rcube_webmail.prototype.passkeys_remove = function (cred_id) {
     if (!cred_id) {
@@ -119,8 +150,6 @@ rcube_webmail.prototype.passkeys_remove = function (cred_id) {
 
 /**
  * Server callback: append a freshly enrolled credential to the table.
- *
- * @param {object} o {id, label, created, lastused}
  */
 rcube_webmail.prototype.passkeys_add_row = function (o) {
     var $table = $('#passkeys-list');
@@ -143,15 +172,12 @@ rcube_webmail.prototype.passkeys_add_row = function (o) {
 
 /**
  * Server callback: drop a removed credential's row from the table.
- *
- * @param {string} cred_id base64url credential id
  */
 rcube_webmail.prototype.passkeys_remove_row = function (cred_id) {
     var $table = $('#passkeys-list');
 
     $table.find('tr[data-credential-id="' + cred_id + '"]').remove();
 
-    // Nothing left: restore the empty-state row.
     if (!$table.find('tbody tr').length) {
         var $cell = $('<td>').attr('colspan', 4).addClass('passkeys-empty')
             .text(this.get_label('nopasskeys', 'passkeys'));
@@ -159,9 +185,216 @@ rcube_webmail.prototype.passkeys_remove_row = function (cred_id) {
     }
 };
 
+/* ------------------------------------------------------------------ *
+ *  Passwordless login                                                 *
+ * ------------------------------------------------------------------ */
+
 /**
- * Convert a base64url string to an ArrayBuffer.
+ * Kick off the passwordless login ceremony: fetch an assertion challenge.
  */
+rcube_webmail.prototype.passkeys_login = function () {
+    if (!this.passkeys_supported()) {
+        this.display_message(this.get_label('notsupported', 'passkeys'), 'error');
+        return false;
+    }
+
+    this.http_post('plugin.passkeys.auth-challenge', {}, this.set_busy(true, 'loading'));
+    return false;
+};
+
+/**
+ * Server callback: run navigator.credentials.get() with the PRF extension,
+ * keep the PRF output, and submit the assertion for verification.
+ *
+ * @param {object} data {args, prf_salt}
+ */
+rcube_webmail.prototype.passkeys_authenticate = function (data) {
+    var ref = this;
+    var args = data.args;
+    var salt = this.passkeys_b64url_to_buf(data.prf_salt);
+
+    try {
+        args.publicKey.challenge = this.passkeys_b64url_to_buf(args.publicKey.challenge);
+        (args.publicKey.allowCredentials || []).forEach(function (c) {
+            c.id = ref.passkeys_b64url_to_buf(c.id);
+        });
+        args.publicKey.extensions = args.publicKey.extensions || {};
+        args.publicKey.extensions.prf = { eval: { first: salt } };
+    } catch (e) {
+        this.display_message(this.get_label('weberror', 'passkeys'), 'error');
+        return;
+    }
+
+    navigator.credentials.get(args)
+        .then(function (assertion) {
+            var r = assertion.response;
+            var ext = assertion.getClientExtensionResults();
+
+            if (!ext.prf || !ext.prf.results || !ext.prf.results.first) {
+                ref.display_message(ref.get_label('noprf', 'passkeys'), 'error');
+                return;
+            }
+
+            ref._passkeys_prf = new Uint8Array(ext.prf.results.first);
+
+            ref.http_post('plugin.passkeys.assert', {
+                _id: assertion.id,
+                _clientDataJSON: ref.passkeys_buf_to_b64url(r.clientDataJSON),
+                _authenticatorData: ref.passkeys_buf_to_b64url(r.authenticatorData),
+                _signature: ref.passkeys_buf_to_b64url(r.signature),
+                _userHandle: r.userHandle ? ref.passkeys_buf_to_b64url(r.userHandle) : ''
+            }, ref.set_busy(true, 'loading'));
+        })
+        .catch(function (err) {
+            ref.passkeys_report_error(err);
+        });
+};
+
+/**
+ * Server callback: decrypt the wrapped IMAP password with the PRF output and
+ * complete a normal login.
+ *
+ * @param {object} data {username, wrapped_secret, wrap_iv}
+ */
+rcube_webmail.prototype.passkeys_unwrap = function (data) {
+    var ref = this;
+    var prf = this._passkeys_prf;
+
+    if (!prf) {
+        this.display_message(this.get_label('weberror', 'passkeys'), 'error');
+        return;
+    }
+
+    var ct = this.passkeys_b64url_to_buf(data.wrapped_secret);
+    var iv = this.passkeys_b64url_to_buf(data.wrap_iv);
+
+    window.crypto.subtle.importKey('raw', prf, { name: 'AES-GCM' }, false, ['decrypt'])
+        .then(function (key) {
+            return window.crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, key, ct);
+        })
+        .then(function (pt) {
+            ref._passkeys_prf = null;
+            ref.passkeys_submit_login(data.username, new TextDecoder().decode(pt));
+        })
+        .catch(function () {
+            ref._passkeys_prf = null;
+            ref.display_message(ref.get_label('weberror', 'passkeys'), 'error');
+        });
+};
+
+/**
+ * Server callback: show a login error.
+ */
+rcube_webmail.prototype.passkeys_login_error = function (msg) {
+    this.display_message(msg || this.get_label('weberror', 'passkeys'), 'error');
+};
+
+/**
+ * Fill and submit the standard login form so the normal password/2FA login
+ * path runs, exactly as if the user had typed their password.
+ */
+rcube_webmail.prototype.passkeys_submit_login = function (username, password) {
+    var form = (this.gui_objects && this.gui_objects.loginform) || document.forms['login-form'];
+
+    if (!form) {
+        this.display_message(this.get_label('weberror', 'passkeys'), 'error');
+        return;
+    }
+
+    $('#rcmloginuser', form).val(username);
+    $('#rcmloginpwd', form).val(password);
+
+    form.submit();
+};
+
+/* ------------------------------------------------------------------ *
+ *  PRF / crypto helpers                                               *
+ * ------------------------------------------------------------------ */
+
+/**
+ * Obtain the PRF output for a freshly created credential. Prefers the value
+ * returned inline by create(); falls back to an extra get() when the platform
+ * only reports the extension as enabled.
+ *
+ * @return {Promise<Uint8Array>}
+ */
+rcube_webmail.prototype.passkeys_obtain_prf = function (credential, salt) {
+    var ext = credential.getClientExtensionResults();
+
+    if (ext.prf && ext.prf.results && ext.prf.results.first) {
+        return Promise.resolve(new Uint8Array(ext.prf.results.first));
+    }
+
+    if (ext.prf && ext.prf.enabled) {
+        return this.passkeys_prf_via_get(credential.rawId, salt);
+    }
+
+    return Promise.reject(new Error('no-prf'));
+};
+
+/**
+ * Fetch a PRF output via an immediate get() against a specific credential.
+ * The challenge here is local-only (used solely to evaluate the PRF, not for
+ * authentication), so a random value is fine.
+ *
+ * @return {Promise<Uint8Array>}
+ */
+rcube_webmail.prototype.passkeys_prf_via_get = function (rawId, salt) {
+    return navigator.credentials.get({
+        publicKey: {
+            challenge: window.crypto.getRandomValues(new Uint8Array(32)),
+            allowCredentials: [{ type: 'public-key', id: rawId }],
+            userVerification: 'preferred',
+            timeout: 60000,
+            extensions: { prf: { eval: { first: salt } } }
+        }
+    }).then(function (assertion) {
+        var ext = assertion.getClientExtensionResults();
+        if (ext.prf && ext.prf.results && ext.prf.results.first) {
+            return new Uint8Array(ext.prf.results.first);
+        }
+        throw new Error('no-prf');
+    });
+};
+
+/**
+ * AES-GCM encrypt a string under a raw PRF key.
+ *
+ * @return {Promise<{wrapped_secret: string, wrap_iv: string}>}
+ */
+rcube_webmail.prototype.passkeys_wrap = function (prf_bytes, plaintext) {
+    var ref = this;
+    var iv = window.crypto.getRandomValues(new Uint8Array(12));
+
+    return window.crypto.subtle.importKey('raw', prf_bytes, { name: 'AES-GCM' }, false, ['encrypt'])
+        .then(function (key) {
+            return window.crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, key, new TextEncoder().encode(plaintext));
+        })
+        .then(function (ct) {
+            return {
+                wrapped_secret: ref.passkeys_buf_to_b64url(ct),
+                wrap_iv: ref.passkeys_buf_to_b64url(iv.buffer)
+            };
+        });
+};
+
+/**
+ * Map an exception from a WebAuthn ceremony to a user-facing message.
+ */
+rcube_webmail.prototype.passkeys_report_error = function (err) {
+    if (err && (err.name == 'NotAllowedError' || err.name == 'AbortError')) {
+        this.display_message(this.get_label('passkeyaddcancelled', 'passkeys'), 'notice');
+    } else if (err && err.message === 'no-prf') {
+        this.display_message(this.get_label('noprf', 'passkeys'), 'error');
+    } else {
+        this.display_message(this.get_label('weberror', 'passkeys'), 'error');
+    }
+};
+
+/* ------------------------------------------------------------------ *
+ *  base64url helpers                                                  *
+ * ------------------------------------------------------------------ */
+
 rcube_webmail.prototype.passkeys_b64url_to_buf = function (str) {
     str = String(str).replace(/-/g, '+').replace(/_/g, '/');
     while (str.length % 4) {
@@ -176,9 +409,6 @@ rcube_webmail.prototype.passkeys_b64url_to_buf = function (str) {
     return bytes.buffer;
 };
 
-/**
- * Convert an ArrayBuffer to a base64url string (no padding).
- */
 rcube_webmail.prototype.passkeys_buf_to_b64url = function (buf) {
     var bytes = new Uint8Array(buf), bin = '';
     for (var i = 0; i < bytes.length; i++) {

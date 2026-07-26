@@ -94,11 +94,20 @@ This plugin is being built in phases:
    store in place.
 2. **Enrolment (done)** — the WebAuthn registration ceremony from the Settings
    tab: create a discoverable credential, validate the attestation
-   server-side, and persist it. (A credential enrolled now is not yet usable
-   for sign-in — that arrives with phases 3–4.)
-3. PRF-based wrapping of the IMAP password.
-4. Passwordless login from the login screen.
-5. Hardening (signature-counter checks, lockout integration, origin checks).
+   server-side, and persist it.
+3. **PRF wrapping (done)** — at enrolment the IMAP password is encrypted with a
+   key derived from the passkey (WebAuthn PRF/hmac-secret) and stored as
+   `wrapped_secret`; the server never holds a key that can decrypt it.
+4. **Passwordless login (done)** — a "Sign in with a passkey" button on the
+   login page. The assertion is verified server-side (via the `startup` hook,
+   since Roundcube short-circuits unauthenticated requests), the wrapped
+   password is released, decrypted in the browser, and the standard login form
+   is submitted so the normal password/2FA path completes the sign-in.
+5. **Hardening (partial)** — signature-counter regression check and last-used
+   stamping are in place. Still to do: explicit CSRF token checks on the AJAX
+   endpoints, brute-force/lockout integration on the assert path, and a
+   re-enrolment prompt when a stored password becomes stale (IMAP password
+   changed out-of-band).
 
 ## License
 

@@ -20,6 +20,7 @@ $labels['passkeylastused'] = 'Last used';
 $labels['passkeyneverused'] = 'Never';
 $labels['unnamedpasskey'] = 'Passkey';
 $labels['passkeynameprompt'] = 'Name for this passkey:';
+$labels['loginwithpasskey'] = 'Sign in with a passkey';
 
 $messages = [];
 $messages['passkeyadded'] = 'Passkey added successfully.';
@@ -31,4 +32,5 @@ $messages['passkeyrenameerror'] = 'Could not rename the passkey.';
 $messages['passkeyremoveconfirm'] = 'Remove this passkey? You will no longer be able to sign in with it.';
 $messages['notsupported'] = 'Your browser does not support passkeys.';
 $messages['weberror'] = 'The passkey operation failed. Please try again.';
+$messages['noprf'] = 'This device or browser cannot store your password securely for passwordless sign-in. Passkey sign-in is not available here.';
 $messages['libmissing'] = 'Passkey support is not fully installed on the server. Please contact your administrator.';

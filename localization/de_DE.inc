@@ -20,6 +20,7 @@ $labels['passkeylastused'] = 'Zuletzt verwendet';
 $labels['passkeyneverused'] = 'Nie';
 $labels['unnamedpasskey'] = 'Passkey';
 $labels['passkeynameprompt'] = 'Name für diesen Passkey:';
+$labels['loginwithpasskey'] = 'Mit Passkey anmelden';
 
 $messages = [];
 $messages['passkeyadded'] = 'Passkey erfolgreich hinzugefügt.';
@@ -31,4 +32,5 @@ $messages['passkeyrenameerror'] = 'Passkey konnte nicht umbenannt werden.';
 $messages['passkeyremoveconfirm'] = 'Diesen Passkey entfernen? Sie können sich damit nicht mehr anmelden.';
 $messages['notsupported'] = 'Ihr Browser unterstützt keine Passkeys.';
 $messages['weberror'] = 'Der Passkey-Vorgang ist fehlgeschlagen. Bitte erneut versuchen.';
+$messages['noprf'] = 'Dieses Gerät oder dieser Browser kann Ihr Passwort nicht sicher für die passwortlose Anmeldung speichern. Die Passkey-Anmeldung ist hier nicht verfügbar.';
 $messages['libmissing'] = 'Die Passkey-Unterstützung ist auf dem Server nicht vollständig installiert. Bitte wenden Sie sich an Ihren Administrator.';

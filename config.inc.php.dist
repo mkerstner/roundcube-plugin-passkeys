@@ -40,6 +40,14 @@ $config['passkeys_timeout'] = 60;
 //                     second factor after password login (no passwordless).
 $config['passkeys_on_no_prf'] = 'reject';
 
+// Salt used to evaluate the WebAuthn PRF (hmac-secret) extension. The actual
+// entropy of the wrapping key comes from the authenticator's per-credential
+// secret; this salt only needs to stay constant across enrolment and login.
+// Changing it after passkeys have been enrolled makes existing wrapped
+// passwords undecryptable (users would need to re-enrol). Leave as-is unless
+// you have a specific reason to change it.
+$config['passkeys_prf_salt'] = 'roundcube-passkeys-prf-v1';
+
 // Accepted attestation statement formats. The default list matches what the
 // bundled WebAuthn library understands. Restrict this only if you enforce a
 // specific attestation policy.

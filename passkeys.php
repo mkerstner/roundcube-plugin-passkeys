@@ -31,9 +31,10 @@ use lbuchs\WebAuthn\Binary\ByteBuffer;
 class passkeys extends rcube_plugin
 {
     // Active in Settings (enrolment/management) and on the login screen
-    // (passwordless sign-in, added in a later phase). Never active on logout.
+    // (passwordless sign-in). Never active on logout. This plugin is
+    // AJAX-driven, so it must NOT set $noframe/$noajax (those would make the
+    // plugin API skip init() for framed/AJAX requests).
     public $task = '?(?!logout).*';
-    public $noframe = true;
 
     /** @var rcmail */
     private $rc;
@@ -66,7 +67,55 @@ class passkeys extends rcube_plugin
 
             $this->include_script('passkeys.js');
             $this->include_stylesheet($this->local_skin_path() . '/passkeys.css');
+        } elseif ($this->rc->task == 'login') {
+            // The login page short-circuits to rendering the login template for
+            // unauthenticated requests (index.php), so plugin AJAX actions never
+            // reach the normal dispatcher. We handle them in the startup hook,
+            // which runs before that short-circuit.
+            $this->add_hook('startup', [$this, 'login_startup']);
+            $this->add_hook('template_container', [$this, 'login_container']);
+
+            $this->include_script('passkeys.js');
+            $this->include_stylesheet($this->local_skin_path() . '/passkeys.css');
         }
+    }
+
+    /**
+     * Handle the passwordless-login AJAX endpoints before the unauthenticated
+     * request is short-circuited to the login page.
+     */
+    public function login_startup($args)
+    {
+        if ($args['task'] === 'login' && empty($this->rc->user->ID)) {
+            if ($args['action'] === 'plugin.passkeys.auth-challenge') {
+                $this->action_auth_challenge();  // sends response and exits
+            } elseif ($args['action'] === 'plugin.passkeys.assert') {
+                $this->action_assert();          // sends response and exits
+            }
+        }
+
+        return $args;
+    }
+
+    /**
+     * Inject the "Sign in with a passkey" button into the login form footer.
+     * The button is hidden until the client script confirms WebAuthn support.
+     */
+    public function login_container($args)
+    {
+        if ($args['name'] === 'loginfooter') {
+            $button = html::tag('button', [
+                'type' => 'button',
+                'id' => 'passkeys-login-button',
+                'class' => 'btn btn-secondary button passkeys-login',
+                'style' => 'display:none',
+                'onclick' => 'return rcmail.passkeys_login()',
+            ], rcube::Q($this->gettext('loginwithpasskey')));
+
+            $args['content'] = ($args['content'] ?? '') . html::div(['id' => 'passkeys-login'], $button);
+        }
+
+        return $args;
     }
 
     /**
@@ -224,7 +273,16 @@ class passkeys extends rcube_plugin
         // base64url-encoded so it survives Roundcube's text-based session store.
         $_SESSION['passkeys_reg_challenge'] = self::b64url_encode($wa->getChallenge()->getBinaryString());
 
-        $this->rc->output->command('passkeys_create', $args);
+        // The client wraps the current IMAP password with a key derived from the
+        // passkey (PRF extension) so it can be recovered at passwordless login.
+        // The password only transits to the browser over TLS and is never stored
+        // server-side in a form the server can decrypt.
+        $this->rc->output->command('passkeys_create', [
+            'args' => $args,
+            'prf_salt' => self::b64url_encode($this->prf_salt()),
+            'password' => $this->rc->decrypt($_SESSION['password']),
+            'on_no_prf' => $this->rc->config->get('passkeys_on_no_prf', 'reject'),
+        ]);
         $this->rc->output->send();
     }
 
@@ -246,6 +304,9 @@ class passkeys extends rcube_plugin
         $attestation = self::b64url_decode(rcube_utils::get_input_string('_attestationObject', rcube_utils::INPUT_POST));
         $label = trim(rcube_utils::get_input_string('_label', rcube_utils::INPUT_POST));
         $transports = rcube_utils::get_input_string('_transports', rcube_utils::INPUT_POST);
+        $wrapped_secret = rcube_utils::get_input_string('_wrapped_secret', rcube_utils::INPUT_POST);
+        $wrap_iv = rcube_utils::get_input_string('_wrap_iv', rcube_utils::INPUT_POST);
+        $prf_supported = (bool) rcube_utils::get_input_value('_prf_supported', rcube_utils::INPUT_POST);
         $require_uv = (bool) $this->rc->config->get('passkeys_require_uv', true);
 
         try {
@@ -272,10 +333,9 @@ class passkeys extends rcube_plugin
             'aaguid' => $aaguid,
             'label' => $label !== '' ? $label : null,
             'transports' => $transports !== '' ? $transports : null,
-            // PRF wrapping of the IMAP password is added in the next phase.
-            'prf_supported' => 0,
-            'wrapped_secret' => null,
-            'wrap_iv' => null,
+            'prf_supported' => $prf_supported ? 1 : 0,
+            'wrapped_secret' => $wrapped_secret !== '' ? $wrapped_secret : null,
+            'wrap_iv' => $wrap_iv !== '' ? $wrap_iv : null,
         ]);
 
         if (!$ok) {
@@ -292,6 +352,111 @@ class passkeys extends rcube_plugin
 
         $this->rc->output->command('passkeys_add_row', $row);
         $this->rc->output->show_message($this->gettext('passkeyadded'), 'confirmation');
+        $this->rc->output->send();
+    }
+
+    /**
+     * AJAX (login page, via startup hook): issue an assertion challenge for a
+     * discoverable passkey. No user is known yet — the authenticator returns
+     * the user handle.
+     */
+    public function action_auth_challenge()
+    {
+        $wa = $this->get_webauthn();
+        if (!$wa) {
+            $this->rc->output->command('passkeys_login_error', $this->gettext('libmissing'));
+            $this->rc->output->send();
+        }
+
+        $require_uv = (bool) $this->rc->config->get('passkeys_require_uv', true);
+        $timeout = (int) $this->rc->config->get('passkeys_timeout', 60);
+
+        try {
+            // Empty credential id list => usernameless/discoverable login.
+            $args = $wa->getGetArgs([], $timeout, true, true, true, true, true, $require_uv);
+        } catch (Throwable $e) {
+            rcube::raise_error($e, true, false);
+            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
+            $this->rc->output->send();
+        }
+
+        $_SESSION['passkeys_auth_challenge'] = self::b64url_encode($wa->getChallenge()->getBinaryString());
+
+        $this->rc->output->command('passkeys_authenticate', [
+            'args' => $args,
+            'prf_salt' => self::b64url_encode($this->prf_salt()),
+        ]);
+        $this->rc->output->send();
+    }
+
+    /**
+     * AJAX (login page, via startup hook): verify a passkey assertion and, on
+     * success, release the wrapped IMAP password so the client can decrypt it
+     * and complete a normal login. The assertion is the gate that authorizes
+     * releasing the (still PRF-encrypted) secret.
+     */
+    public function action_assert()
+    {
+        $wa = $this->get_webauthn();
+        $stored = $_SESSION['passkeys_auth_challenge'] ?? null;
+
+        if (!$wa || !$stored) {
+            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
+            $this->rc->output->send();
+        }
+
+        $challenge = self::b64url_decode($stored);
+        $id = rcube_utils::get_input_string('_id', rcube_utils::INPUT_POST);
+        $client_data = self::b64url_decode(rcube_utils::get_input_string('_clientDataJSON', rcube_utils::INPUT_POST));
+        $auth_data = self::b64url_decode(rcube_utils::get_input_string('_authenticatorData', rcube_utils::INPUT_POST));
+        $signature = self::b64url_decode(rcube_utils::get_input_string('_signature', rcube_utils::INPUT_POST));
+        $require_uv = (bool) $this->rc->config->get('passkeys_require_uv', true);
+
+        $cred = $id !== '' ? $this->store->get_by_credential_id($id) : null;
+
+        // The passkey must exist and carry a wrapped password (i.e. it was
+        // enrolled with PRF support); otherwise passwordless login is impossible.
+        if (!$cred || empty($cred['wrapped_secret'])) {
+            unset($_SESSION['passkeys_auth_challenge']);
+            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
+            $this->rc->output->send();
+        }
+
+        try {
+            $wa->processGet($client_data, $auth_data, $signature, $cred['public_key'],
+                $challenge, (int) $cred['sign_count'], $require_uv);
+        } catch (Throwable $e) {
+            rcube::raise_error($e, true, false);
+            unset($_SESSION['passkeys_auth_challenge']);
+            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
+            $this->rc->output->send();
+        }
+
+        unset($_SESSION['passkeys_auth_challenge']);
+
+        // Advance the signature counter (cloned-authenticator detection) and
+        // stamp last-used.
+        $new_counter = (int) $cred['sign_count'];
+        if (strlen($auth_data) >= 37) {
+            $unpacked = unpack('N', substr($auth_data, 33, 4));
+            $new_counter = max($new_counter, (int) ($unpacked[1] ?? 0));
+        }
+        $this->store->update_sign_count($id, $new_counter);
+
+        // Resolve the login name for this credential's owner.
+        $user = new rcube_user((int) $cred['user_id']);
+        $username = $user->ID ? $user->get_username() : null;
+
+        if (!$username) {
+            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
+            $this->rc->output->send();
+        }
+
+        $this->rc->output->command('passkeys_unwrap', [
+            'username' => $username,
+            'wrapped_secret' => $cred['wrapped_secret'],
+            'wrap_iv' => $cred['wrap_iv'],
+        ]);
         $this->rc->output->send();
     }
 
@@ -382,6 +547,22 @@ class passkeys extends rcube_plugin
     {
         return $this->rc->config->get('passkeys_rp_name')
             ?: ($this->rc->config->get('product_name') ?: 'Roundcube Webmail');
+    }
+
+    /**
+     * Fixed salt for the WebAuthn PRF evaluation.
+     *
+     * The real entropy of the wrapping key comes from the authenticator's
+     * per-credential secret; this salt only has to be stable across enrolment
+     * and login, so a constant (optionally overridden per install) is fine.
+     *
+     * @return string 32 raw bytes
+     */
+    private function prf_salt()
+    {
+        $seed = $this->rc->config->get('passkeys_prf_salt', 'roundcube-passkeys-prf-v1');
+
+        return hash('sha256', (string) $seed, true);
     }
 
     /**
