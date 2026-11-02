@@ -31,7 +31,8 @@ use lbuchs\WebAuthn\Binary\ByteBuffer;
 class passkeys extends rcube_plugin
 {
     // Active in Settings (enrolment/management) and on the login screen
-    // (passwordless sign-in). Never active on logout. This plugin is
+    // (passwordless sign-in). Not initialized on logout: core then switches to
+    // the login page and re-runs init() for task "login". This plugin is
     // AJAX-driven, so it must NOT set $noframe/$noajax (those would make the
     // plugin API skip init() for framed/AJAX requests).
     public $task = '?(?!logout).*';
@@ -56,7 +57,18 @@ class passkeys extends rcube_plugin
         require_once __DIR__ . '/lib/rcube_passkeys_store.php';
         $this->store = new rcube_passkeys_store($this->rc->get_dbh());
 
-        if ($this->rc->task == 'settings') {
+        // Add the passkey button to the login form itself, right below the
+        // standard Login button. loginform_content is a core hook and the form
+        // is rendered by core, so this works on every skin. Registered for every
+        // task: core also renders the login form after a session timeout, from
+        // whatever task the request started in.
+        $this->add_hook('loginform_content', [$this, 'login_form_content']);
+
+        // The plugin API's task, not $this->rc->task: when core switches to the
+        // login page (after logout) it re-runs init() before updating the latter.
+        $task = $this->api->task;
+
+        if ($task == 'settings') {
             $this->add_hook('settings_actions', [$this, 'settings_actions']);
 
             $this->register_action('plugin.passkeys', [$this, 'settings_page']);
@@ -68,19 +80,12 @@ class passkeys extends rcube_plugin
             $this->include_script('passkeys.js');
             // Skin-independent stylesheet (works on any skin, not just elastic).
             $this->include_stylesheet('passkeys.css');
-        } elseif ($this->rc->task == 'login') {
+        } elseif ($task == 'login') {
             // The login page short-circuits to rendering the login template for
             // unauthenticated requests (index.php), so plugin AJAX actions never
             // reach the normal dispatcher. We handle them in the startup hook,
             // which runs before that short-circuit.
             $this->add_hook('startup', [$this, 'login_startup']);
-            // Add the passkey button to the login form itself, right below the
-            // standard Login button. loginform_content is a core hook and the
-            // form is rendered by core, so this works on every skin.
-            $this->add_hook('loginform_content', [$this, 'login_form_content']);
-
-            $this->include_script('passkeys.js');
-            $this->include_stylesheet('passkeys.css');
         }
     }
 
@@ -110,6 +115,9 @@ class passkeys extends rcube_plugin
      */
     public function login_form_content($content)
     {
+        $this->include_script('passkeys.js');
+        $this->include_stylesheet('passkeys.css');
+
         // "──── or sign in using passkeys ────"
         $content['buttons']['passkeys_sep'] = [
             'outterclass' => 'passkeys-separator',
@@ -535,17 +543,18 @@ class passkeys extends rcube_plugin
 
     /**
      * Relying Party ID: the registrable domain the users reach Roundcube on.
+     *
+     * Derived from the Host the browser used (port stripped, subject to
+     * trusted_host_patterns), not SERVER_NAME: behind a reverse proxy or with
+     * a catch-all vhost SERVER_NAME is often "_", "localhost" or an internal
+     * name, and WebAuthn then fails with an origin mismatch.
      */
     private function rp_id()
     {
         $rp_id = $this->rc->config->get('passkeys_rp_id');
 
         if (empty($rp_id)) {
-            $rp_id = rcube_utils::server_name();
-            // strip any port component
-            if (($pos = strpos($rp_id, ':')) !== false) {
-                $rp_id = substr($rp_id, 0, $pos);
-            }
+            $rp_id = rcube_utils::server_name('HTTP_HOST');
         }
 
         return $rp_id;

@@ -1,0 +1,6 @@
+# Store and check out text files with LF on every platform (the plugin runs on
+# Linux servers; core.autocrlf on Windows would otherwise turn them into CRLF).
+* text=auto eol=lf
+
+# Development tooling (Docker instance, end-to-end test) is not part of releases.
+/dev export-ignore

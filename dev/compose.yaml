@@ -1,0 +1,39 @@
+# Local Roundcube + GreenMail for developing and testing the passkeys plugin.
+#
+#   docker compose -f dev/compose.yaml up -d     ->  http://localhost:8766
+#   docker compose -f dev/compose.yaml down      (everything is thrown away)
+#
+# Needs a Roundcube checkout with `composer install` done and lbuchs/webauthn in
+# its vendor/ (ROUNDCUBE_DIR, default: a sibling folder named roundcubemail).
+# The checkout is mounted READ-ONLY and copied inside the container without its
+# config/config.inc.php, so its real database is never touched (see start.sh).
+# This plugin folder is mounted live at plugins/passkeys: edit and reload.
+#
+# GreenMail runs WITH authentication, so a wrong password fails like on a real
+# server (needed for the lockout and stale-password paths). Test accounts:
+#   alice@example.net / alice-pass        bob@example.net / bob-pass
+# PASSKEYS_DEV_SKIN selects the skin (default elastic; any skin in the checkout).
+#
+# Paths are relative to this file.
+name: passkeys-dev
+
+services:
+  mailhost:
+    image: docker.io/greenmail/standalone
+    environment:
+      GREENMAIL_OPTS: '-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=alice:alice-pass@example.net,bob:bob-pass@example.net -Dgreenmail.users.login=email'
+
+  webmail:
+    image: ghcr.io/roundcube/roundcubemail-testrunner:php8.3
+    depends_on:
+      - mailhost
+    ports:
+      - '127.0.0.1:8766:8000'
+    environment:
+      PASSKEYS_DEV_SKIN: '${PASSKEYS_DEV_SKIN:-elastic}'
+    volumes:
+      - '${ROUNDCUBE_DIR:-../../roundcubemail}:/app:ro'
+      - '..:/work/plugins/passkeys:ro'
+      - './config.inc.php:/dev-config/config.inc.php:ro'
+      - './start.sh:/dev-config/start.sh:ro'
+    entrypoint: ['/bin/bash', '/dev-config/start.sh']
