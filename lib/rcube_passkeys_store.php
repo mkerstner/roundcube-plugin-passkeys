@@ -161,6 +161,70 @@ class rcube_passkeys_store
     }
 
     /**
+     * Replace the wrapped password after the user's password changed, clear
+     * the stale flag, and record the assertion that authorized it.
+     *
+     * @param int    $user_id
+     * @param string $credential_id
+     * @param string $wrapped_secret
+     * @param string $wrap_iv
+     * @param int    $sign_count
+     *
+     * @return bool
+     */
+    public function update_secret($user_id, $credential_id, $wrapped_secret, $wrap_iv, $sign_count)
+    {
+        $result = $this->db->query(
+            "UPDATE {$this->table} SET `wrapped_secret` = ?, `wrap_iv` = ?, `stale` = 0,"
+                . " `sign_count` = ?, `last_used` = ?"
+                . " WHERE `user_id` = ? AND `credential_id` = ?",
+            (string) $wrapped_secret,
+            (string) $wrap_iv,
+            (int) $sign_count,
+            date('Y-m-d H:i:s'),
+            (int) $user_id,
+            (string) $credential_id
+        );
+
+        return $this->db->affected_rows($result) > 0;
+    }
+
+    /**
+     * Flag a credential whose wrapped password no longer works (the user's
+     * password changed after it was enrolled).
+     *
+     * @param string $credential_id
+     *
+     * @return bool
+     */
+    public function mark_stale($credential_id)
+    {
+        $result = $this->db->query(
+            "UPDATE {$this->table} SET `stale` = 1 WHERE `credential_id` = ?",
+            (string) $credential_id
+        );
+
+        return $this->db->affected_rows($result) > 0;
+    }
+
+    /**
+     * Flag all of a user's credentials as stale, e.g. after a password change.
+     *
+     * @param int $user_id
+     *
+     * @return int Number of credentials flagged
+     */
+    public function mark_user_stale($user_id)
+    {
+        $result = $this->db->query(
+            "UPDATE {$this->table} SET `stale` = 1 WHERE `user_id` = ?",
+            (int) $user_id
+        );
+
+        return $this->db->affected_rows($result);
+    }
+
+    /**
      * Rename a credential's user-visible label.
      *
      * @param int    $user_id

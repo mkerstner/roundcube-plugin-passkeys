@@ -20,11 +20,12 @@ use lbuchs\WebAuthn\Binary\ByteBuffer;
 /**
  * Passwordless passkey authentication plugin.
  *
- * Phase 2 adds the WebAuthn registration ceremony to the Settings tab: a user
- * can enrol a passkey, which is validated server-side and persisted. Binding
- * the IMAP password to the passkey (PRF wrapping) and the passwordless login
- * path are added in later phases, so an enrolled passkey is not yet usable for
- * sign-in.
+ * Roundcube needs the real IMAP password, so a passkey cannot stand in for
+ * it. At enrolment the browser encrypts the user's password with a key only
+ * the passkey can derive (WebAuthn PRF) and the server stores the ciphertext.
+ * At sign-in the assertion is verified here, the ciphertext released and
+ * decrypted in the browser, and the standard login form submitted, so the
+ * normal password/2FA path completes the login.
  *
  * @author Matthias Kerstner
  */
@@ -42,6 +43,9 @@ class passkeys extends rcube_plugin
 
     /** @var rcube_passkeys_store */
     private $store;
+
+    /** @var array|null The verified passkey sign-in this login request completes */
+    private $passkey_login;
 
     #[\Override]
     public function init()
@@ -70,10 +74,14 @@ class passkeys extends rcube_plugin
 
         if ($task == 'settings') {
             $this->add_hook('settings_actions', [$this, 'settings_actions']);
+            // Fired by the password plugin: every passkey still holds the old password.
+            $this->add_hook('password_change', [$this, 'password_change']);
 
             $this->register_action('plugin.passkeys', [$this, 'settings_page']);
             $this->register_action('plugin.passkeys.reg-challenge', [$this, 'action_reg_challenge']);
             $this->register_action('plugin.passkeys.register', [$this, 'action_register']);
+            $this->register_action('plugin.passkeys.update-challenge', [$this, 'action_update_challenge']);
+            $this->register_action('plugin.passkeys.update', [$this, 'action_update']);
             $this->register_action('plugin.passkeys.remove', [$this, 'action_remove']);
             $this->register_action('plugin.passkeys.rename', [$this, 'action_rename']);
 
@@ -86,16 +94,37 @@ class passkeys extends rcube_plugin
             // reach the normal dispatcher. We handle them in the startup hook,
             // which runs before that short-circuit.
             $this->add_hook('startup', [$this, 'login_startup']);
+            $this->add_hook('login_failed', [$this, 'login_failed']);
+            $this->add_hook('login_after', [$this, 'login_after']);
+        }
+
+        // Passkeys holding an old password: ask once, on the first full page
+        // after the login screen (and after any 2FA step, which runs there).
+        if ($task != 'login' && !empty($_SESSION['passkeys_stale_prompt'])
+            && $this->rc->output->type == 'html' && empty($_REQUEST['_framed'])
+        ) {
+            $this->rc->session->remove('passkeys_stale_prompt');
+            $this->include_script('passkeys.js');
+            $this->rc->output->set_env('passkeys_stale_prompt', true);
         }
     }
 
     /**
      * Handle the passwordless-login AJAX endpoints before the unauthenticated
-     * request is short-circuited to the login page.
+     * request is short-circuited to the login page, and note whether a login
+     * form submission completes a passkey sign-in.
      */
     public function login_startup($args)
     {
-        if ($args['task'] === 'login' && empty($this->rc->user->ID)) {
+        if ($args['task'] !== 'login') {
+            return $args;
+        }
+
+        if ($args['action'] === 'login') {
+            // Core empties the session before it tries the password, so this
+            // is the last point at which the marker set by action_assert() exists.
+            $this->passkey_login = $this->pending_passkey_login();
+        } elseif (empty($this->rc->user->ID)) {
             if ($args['action'] === 'plugin.passkeys.auth-challenge') {
                 $this->action_auth_challenge();  // sends response and exits
             } elseif ($args['action'] === 'plugin.passkeys.assert') {
@@ -135,6 +164,55 @@ class passkeys extends rcube_plugin
         ];
 
         return $content;
+    }
+
+    /**
+     * A passkey sign-in whose released password the mail server rejected: the
+     * password changed after the passkey was enrolled. Flag the passkey so it
+     * is not used again (every attempt would count towards the account
+     * lockout) and tell the user how to recover.
+     */
+    public function login_failed($args)
+    {
+        // No code: the server rejected the credentials, as opposed to a storage
+        // error, the rate limit or an invalid request.
+        if ($this->passkey_login && empty($args['code'])) {
+            $this->store->mark_stale($this->passkey_login['credential']);
+            $this->rc->output->show_message('passkeys.passkeystale', 'warning', null, true, 15);
+        }
+
+        return $args;
+    }
+
+    /**
+     * After a password login, remind the user of passkeys that still hold an
+     * old password (the prompt itself is shown by init() on the next page).
+     */
+    public function login_after($args)
+    {
+        if (!$this->passkey_login) {
+            foreach ($this->store->list_by_user($this->rc->user->ID) as $cred) {
+                if (!empty($cred['stale'])) {
+                    $_SESSION['passkeys_stale_prompt'] = true;
+                    break;
+                }
+            }
+        }
+
+        return $args;
+    }
+
+    /**
+     * The password plugin changed the user's password: flag all their passkeys
+     * for an update.
+     */
+    public function password_change($args)
+    {
+        if ($this->store->mark_user_stale($this->rc->user->ID)) {
+            $_SESSION['passkeys_stale_prompt'] = true;
+        }
+
+        return $args;
     }
 
     /**
@@ -208,13 +286,25 @@ class passkeys extends rcube_plugin
     }
 
     /**
-     * Append one credential row to the management table.
+     * Append one credential row to the management table. passkeys_row() in
+     * passkeys.js builds the same markup for rows added or updated later.
      */
     private function add_credential_row(html_table $table, array $cred)
     {
         $row = $this->credential_row_data($cred);
+        $name = rcube::Q($row['label']);
+        $actions = '';
 
-        $remove = html::a([
+        if ($row['stale']) {
+            $name .= ' ' . html::span('passkeys-stale', rcube::Q($this->gettext('passkeyneedsupdate')));
+            $actions .= html::a([
+                'href' => '#',
+                'class' => 'button update',
+                'data-passkeys-update' => $row['id'],
+            ], rcube::Q($this->gettext('updatepasskey'))) . ' ';
+        }
+
+        $actions .= html::a([
             'href' => '#',
             'class' => 'button delete',
             'title' => $this->gettext('removepasskey'),
@@ -222,17 +312,17 @@ class passkeys extends rcube_plugin
         ], rcube::Q($this->gettext('removepasskey')));
 
         $table->add_row(['data-credential-id' => $row['id']]);
-        $table->add('name', rcube::Q($row['label']));
+        $table->add('name', $name);
         $table->add('created', rcube::Q($row['created']));
         $table->add('lastused', rcube::Q($row['lastused']));
-        $table->add('actions', $remove);
+        $table->add('actions', $actions);
     }
 
     /**
      * Normalize a stored credential row into the display fields used by both
      * the server-rendered table and the client-side row insertion.
      *
-     * @return array{id: string, label: string, created: string, lastused: string}
+     * @return array{id: string, label: string, created: string, lastused: string, stale: bool}
      */
     private function credential_row_data(array $cred)
     {
@@ -243,14 +333,22 @@ class passkeys extends rcube_plugin
             'lastused' => !empty($cred['last_used'])
                 ? $this->rc->format_date($cred['last_used'])
                 : $this->gettext('passkeyneverused'),
+            'stale' => !empty($cred['stale']) || empty($cred['wrapped_secret']),
         ];
     }
 
     /**
-     * AJAX: issue a WebAuthn registration challenge for the current user.
+     * AJAX: check the typed password and issue a WebAuthn registration
+     * challenge for the current user.
      */
     public function action_reg_challenge()
     {
+        $this->check_request();
+
+        if (!$this->verify_password()) {
+            $this->rc->output->send();
+        }
+
         $wa = $this->get_webauthn();
         if (!$wa) {
             $this->rc->output->show_message($this->gettext('libmissing'), 'error');
@@ -292,15 +390,12 @@ class passkeys extends rcube_plugin
         // base64url-encoded so it survives Roundcube's text-based session store.
         $_SESSION['passkeys_reg_challenge'] = self::b64url_encode($wa->getChallenge()->getBinaryString());
 
-        // The client wraps the current IMAP password with a key derived from the
-        // passkey (PRF extension) so it can be recovered at passwordless login.
-        // The password only transits to the browser over TLS and is never stored
-        // server-side in a form the server can decrypt.
+        // The client encrypts the password the user just typed with a key
+        // derived from the passkey (PRF extension) and sends back only the
+        // ciphertext, which the server cannot decrypt.
         $this->rc->output->command('passkeys_create', [
             'args' => $args,
             'prf_salt' => self::b64url_encode($this->prf_salt()),
-            'password' => $this->rc->decrypt($_SESSION['password']),
-            'on_no_prf' => $this->rc->config->get('passkeys_on_no_prf', 'reject'),
         ]);
         $this->rc->output->send();
     }
@@ -310,8 +405,11 @@ class passkeys extends rcube_plugin
      */
     public function action_register()
     {
+        $this->check_request();
+
         $wa = $this->get_webauthn();
         $stored_challenge = $_SESSION['passkeys_reg_challenge'] ?? null;
+        $this->rc->session->remove('passkeys_reg_challenge');
 
         if (!$wa || !$stored_challenge) {
             $this->rc->output->show_message($this->gettext('passkeyadderror'), 'error');
@@ -325,8 +423,13 @@ class passkeys extends rcube_plugin
         $transports = rcube_utils::get_input_string('_transports', rcube_utils::INPUT_POST);
         $wrapped_secret = rcube_utils::get_input_string('_wrapped_secret', rcube_utils::INPUT_POST);
         $wrap_iv = rcube_utils::get_input_string('_wrap_iv', rcube_utils::INPUT_POST);
-        $prf_supported = (bool) rcube_utils::get_input_value('_prf_supported', rcube_utils::INPUT_POST);
         $require_uv = (bool) $this->rc->config->get('passkeys_require_uv', true);
+
+        // Without the PRF-wrapped password the passkey could never sign in.
+        if ($wrapped_secret === '' || $wrap_iv === '') {
+            $this->rc->output->show_message($this->gettext('noprf'), 'error');
+            $this->rc->output->send();
+        }
 
         try {
             // failIfRootMismatch = false: self-attested / "none" format passkeys
@@ -334,12 +437,9 @@ class passkeys extends rcube_plugin
             $data = $wa->processCreate($client_data, $attestation, $challenge, $require_uv, true, false);
         } catch (Throwable $e) {
             rcube::raise_error($e, true, false);
-            unset($_SESSION['passkeys_reg_challenge']);
             $this->rc->output->show_message($this->gettext('passkeyadderror'), 'error');
             $this->rc->output->send();
         }
-
-        unset($_SESSION['passkeys_reg_challenge']);
 
         $credential_id = self::b64url_encode(self::bytes($data->credentialId));
         $aaguid = !empty($data->AAGUID) ? bin2hex(self::bytes($data->AAGUID)) : null;
@@ -352,9 +452,9 @@ class passkeys extends rcube_plugin
             'aaguid' => $aaguid,
             'label' => $label !== '' ? $label : null,
             'transports' => $transports !== '' ? $transports : null,
-            'prf_supported' => $prf_supported ? 1 : 0,
-            'wrapped_secret' => $wrapped_secret !== '' ? $wrapped_secret : null,
-            'wrap_iv' => $wrap_iv !== '' ? $wrap_iv : null,
+            'prf_supported' => 1,
+            'wrapped_secret' => $wrapped_secret,
+            'wrap_iv' => $wrap_iv,
         ]);
 
         if (!$ok) {
@@ -367,10 +467,103 @@ class passkeys extends rcube_plugin
             'label' => $label,
             'created' => date('Y-m-d H:i:s'),
             'last_used' => null,
+            'wrapped_secret' => $wrapped_secret,
         ]);
 
         $this->rc->output->command('passkeys_add_row', $row);
         $this->rc->output->show_message($this->gettext('passkeyadded'), 'confirmation');
+        $this->rc->output->send();
+    }
+
+    /**
+     * AJAX: start updating a passkey that holds an old password: check the
+     * typed password, then ask that passkey for an assertion and PRF output.
+     */
+    public function action_update_challenge()
+    {
+        $this->check_request();
+
+        $cred_id = rcube_utils::get_input_string('_credential_id', rcube_utils::INPUT_POST);
+        $cred = $cred_id !== '' ? $this->store->get($this->rc->user->ID, $cred_id) : null;
+        $wa = $this->get_webauthn();
+
+        if (!$cred || !$wa) {
+            $this->rc->output->show_message($this->gettext('passkeyupdateerror'), 'error');
+            $this->rc->output->send();
+        }
+
+        if (!$this->verify_password()) {
+            $this->rc->output->send();
+        }
+
+        $require_uv = (bool) $this->rc->config->get('passkeys_require_uv', true);
+        $timeout = (int) $this->rc->config->get('passkeys_timeout', 60);
+
+        try {
+            $args = $wa->getGetArgs([self::b64url_decode($cred_id)], $timeout, true, true, true, true, true, $require_uv);
+        } catch (Throwable $e) {
+            rcube::raise_error($e, true, false);
+            $this->rc->output->show_message($this->gettext('passkeyupdateerror'), 'error');
+            $this->rc->output->send();
+        }
+
+        $_SESSION['passkeys_update_challenge'] = [
+            'credential' => $cred_id,
+            'challenge' => self::b64url_encode($wa->getChallenge()->getBinaryString()),
+        ];
+
+        $this->rc->output->command('passkeys_update_auth', [
+            'args' => $args,
+            'prf_salt' => self::b64url_encode($this->prf_salt()),
+        ]);
+        $this->rc->output->send();
+    }
+
+    /**
+     * AJAX: verify the passkey's assertion and store the password it wrapped
+     * with its PRF output in place of the old one.
+     */
+    public function action_update()
+    {
+        $this->check_request();
+
+        $pending = $_SESSION['passkeys_update_challenge'] ?? null;
+        $this->rc->session->remove('passkeys_update_challenge');
+
+        $user_id = (int) $this->rc->user->ID;
+        $id = rcube_utils::get_input_string('_id', rcube_utils::INPUT_POST);
+        $client_data = self::b64url_decode(rcube_utils::get_input_string('_clientDataJSON', rcube_utils::INPUT_POST));
+        $auth_data = self::b64url_decode(rcube_utils::get_input_string('_authenticatorData', rcube_utils::INPUT_POST));
+        $signature = self::b64url_decode(rcube_utils::get_input_string('_signature', rcube_utils::INPUT_POST));
+        $wrapped_secret = rcube_utils::get_input_string('_wrapped_secret', rcube_utils::INPUT_POST);
+        $wrap_iv = rcube_utils::get_input_string('_wrap_iv', rcube_utils::INPUT_POST);
+        $require_uv = (bool) $this->rc->config->get('passkeys_require_uv', true);
+
+        $cred = is_array($pending) && $id !== '' && hash_equals($pending['credential'], $id)
+            ? $this->store->get($user_id, $id) : null;
+        $wa = $this->get_webauthn();
+
+        if (!$cred || !$wa || $wrapped_secret === '' || $wrap_iv === '') {
+            $this->rc->output->show_message($this->gettext('passkeyupdateerror'), 'error');
+            $this->rc->output->send();
+        }
+
+        try {
+            $wa->processGet($client_data, $auth_data, $signature, $cred['public_key'],
+                self::b64url_decode($pending['challenge']), (int) $cred['sign_count'], $require_uv);
+        } catch (Throwable $e) {
+            rcube::raise_error($e, true, false);
+            $this->rc->output->show_message($this->gettext('passkeyupdateerror'), 'error');
+            $this->rc->output->send();
+        }
+
+        if (!$this->store->update_secret($user_id, $id, $wrapped_secret, $wrap_iv, self::sign_count($auth_data, $cred))) {
+            $this->rc->output->show_message($this->gettext('passkeyupdateerror'), 'error');
+            $this->rc->output->send();
+        }
+
+        $this->rc->output->command('passkeys_update_row', $this->credential_row_data($this->store->get($user_id, $id)));
+        $this->rc->output->show_message($this->gettext('passkeyupdated'), 'confirmation');
         $this->rc->output->send();
     }
 
@@ -381,10 +574,11 @@ class passkeys extends rcube_plugin
      */
     public function action_auth_challenge()
     {
+        $this->check_request();
+
         $wa = $this->get_webauthn();
         if (!$wa) {
-            $this->rc->output->command('passkeys_login_error', $this->gettext('libmissing'));
-            $this->rc->output->send();
+            $this->login_error('libmissing');
         }
 
         $require_uv = (bool) $this->rc->config->get('passkeys_require_uv', true);
@@ -395,8 +589,7 @@ class passkeys extends rcube_plugin
             $args = $wa->getGetArgs([], $timeout, true, true, true, true, true, $require_uv);
         } catch (Throwable $e) {
             rcube::raise_error($e, true, false);
-            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
-            $this->rc->output->send();
+            $this->login_error('loginfailed');
         }
 
         $_SESSION['passkeys_auth_challenge'] = self::b64url_encode($wa->getChallenge()->getBinaryString());
@@ -413,15 +606,23 @@ class passkeys extends rcube_plugin
      * success, release the wrapped IMAP password so the client can decrypt it
      * and complete a normal login. The assertion is the gate that authorizes
      * releasing the (still PRF-encrypted) secret.
+     *
+     * Brute force: the owner's account lockout (login_rate_limit) applies as
+     * for password logins, failed assertions count towards it, and failures
+     * are written to the userlogins log in core's format (fail2ban).
      */
     public function action_assert()
     {
+        $this->check_request();
+
         $wa = $this->get_webauthn();
         $stored = $_SESSION['passkeys_auth_challenge'] ?? null;
+        // One attempt per challenge. Not unset(): Roundcube merges the stored
+        // session into the new one on write, only remove() deletes a key.
+        $this->rc->session->remove('passkeys_auth_challenge');
 
         if (!$wa || !$stored) {
-            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
-            $this->rc->output->send();
+            $this->login_error('loginfailed');
         }
 
         $challenge = self::b64url_decode($stored);
@@ -432,13 +633,19 @@ class passkeys extends rcube_plugin
         $require_uv = (bool) $this->rc->config->get('passkeys_require_uv', true);
 
         $cred = $id !== '' ? $this->store->get_by_credential_id($id) : null;
+        $user = $cred ? new rcube_user((int) $cred['user_id']) : null;
+        $username = $user && $user->ID ? $user->get_username() : null;
 
-        // The passkey must exist and carry a wrapped password (i.e. it was
-        // enrolled with PRF support); otherwise passwordless login is impossible.
-        if (!$cred || empty($cred['wrapped_secret'])) {
-            unset($_SESSION['passkeys_auth_challenge']);
-            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
-            $this->rc->output->send();
+        if (!$username) {
+            // Unknown passkey, e.g. removed here but still on the device. Only
+            // a well-formed id goes into the log (no forged log lines).
+            $this->rc->log_login('passkey ' . (preg_match('/^[A-Za-z0-9_-]{1,64}/', $id, $m) ? substr($m[0], 0, 16) : '?'), true);
+            $this->login_error('loginfailed');
+        }
+
+        if ($user->is_locked()) {
+            $this->rc->log_login($username, true, rcmail::ERROR_RATE_LIMIT);
+            $this->login_error('accountlocked');
         }
 
         try {
@@ -446,32 +653,28 @@ class passkeys extends rcube_plugin
                 $challenge, (int) $cred['sign_count'], $require_uv);
         } catch (Throwable $e) {
             rcube::raise_error($e, true, false);
-            unset($_SESSION['passkeys_auth_challenge']);
-            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
-            $this->rc->output->send();
+            $user->failed_login();
+            $this->rc->log_login($username, true);
+            $this->login_error('loginfailed');
         }
-
-        unset($_SESSION['passkeys_auth_challenge']);
 
         // Advance the signature counter (cloned-authenticator detection) and
         // stamp last-used.
-        $new_counter = (int) $cred['sign_count'];
-        if (strlen($auth_data) >= 37) {
-            $unpacked = unpack('N', substr($auth_data, 33, 4));
-            $new_counter = max($new_counter, (int) ($unpacked[1] ?? 0));
-        }
-        $this->store->update_sign_count($id, $new_counter);
+        $this->store->update_sign_count($id, self::sign_count($auth_data, $cred));
 
-        // Resolve the login name for this credential's owner.
-        $user = new rcube_user((int) $cred['user_id']);
-        $username = $user->ID ? $user->get_username() : null;
-
-        if (!$username) {
-            $this->rc->output->command('passkeys_login_error', $this->gettext('loginfailed'));
+        // The passkey is genuine but its stored password no longer works: send
+        // the user to the password form rather than into a failed IMAP login.
+        if (!empty($cred['stale']) || empty($cred['wrapped_secret'])) {
+            $this->rc->output->command('passkeys_stale', ['username' => $username]);
             $this->rc->output->send();
         }
 
+        // Lets the login request tell a failure of this password apart (see
+        // login_startup() and login_failed()).
+        $_SESSION['passkeys_login'] = ['credential' => $id, 'user' => $username, 'time' => time()];
+
         $this->rc->output->command('passkeys_unwrap', [
+            'credential' => $id,
             'username' => $username,
             'wrapped_secret' => $cred['wrapped_secret'],
             'wrap_iv' => $cred['wrap_iv'],
@@ -484,6 +687,8 @@ class passkeys extends rcube_plugin
      */
     public function action_remove()
     {
+        $this->check_request();
+
         $user_id = (int) $this->rc->user->ID;
         $cred_id = rcube_utils::get_input_string('_credential_id', rcube_utils::INPUT_POST);
 
@@ -502,6 +707,8 @@ class passkeys extends rcube_plugin
      */
     public function action_rename()
     {
+        $this->check_request();
+
         $user_id = (int) $this->rc->user->ID;
         $cred_id = rcube_utils::get_input_string('_credential_id', rcube_utils::INPUT_POST);
         $label = trim(rcube_utils::get_input_string('_label', rcube_utils::INPUT_POST));
@@ -513,6 +720,82 @@ class passkeys extends rcube_plugin
             $this->rc->output->show_message($this->gettext('passkeyrenameerror'), 'error');
         }
 
+        $this->rc->output->send();
+    }
+
+    /**
+     * CSRF protection for the plugin's AJAX endpoints: a POST carrying the
+     * session's request token in the X-Roundcube-Request header, which
+     * rcmail.http_post() always sends and a cross-site page cannot set. Core
+     * checks the token before authenticated actions too, but the login
+     * endpoints run in the startup hook, before any of core's checks.
+     */
+    private function check_request()
+    {
+        $token = rcube_utils::request_header('X-Roundcube-Request');
+
+        if (($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST' || !is_string($token)
+            || !hash_equals($this->rc->get_request_token(), $token)
+        ) {
+            rcube::raise_error(['code' => 403, 'message' => 'passkeys: request security check failed'], true, true);
+        }
+    }
+
+    /**
+     * Check the password typed into the add/update dialog against the one this
+     * session logged in with. Wrapping the password is done with what the user
+     * types, so the server never hands the session's password to the browser
+     * (where a hijacked session or an XSS could read it). Wrong guesses count
+     * towards the account lockout like failed logins. Shows the error.
+     */
+    private function verify_password()
+    {
+        $user = $this->rc->user;
+        $charset = $this->rc->config->get('password_charset', 'UTF-8');
+        $password = rcube_utils::get_input_string('_password', rcube_utils::INPUT_POST, true, $charset);
+
+        if ($user->is_locked()) {
+            $this->rc->output->show_message('accountlocked', 'error');
+            return false;
+        }
+
+        if ($password === '' || !hash_equals((string) $this->rc->decrypt($_SESSION['password']), $password)) {
+            $user->failed_login();
+            $this->rc->output->show_message($this->gettext('passwordincorrect'), 'error');
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * The verified passkey sign-in a login form submission completes: set by
+     * action_assert() in this session, named by the form, for the same user,
+     * and recent.
+     *
+     * @return array{credential: string, user: string, time: int}|null
+     */
+    private function pending_passkey_login()
+    {
+        $marker = $_SESSION['passkeys_login'] ?? null;
+        $posted = rcube_utils::get_input_string('_passkeys_credential', rcube_utils::INPUT_POST);
+        $user = trim(rcube_utils::get_input_string('_user', rcube_utils::INPUT_POST));
+
+        if (is_array($marker) && $posted !== '' && hash_equals($marker['credential'], $posted)
+            && $user === $marker['user'] && time() - $marker['time'] < 300
+        ) {
+            return $marker;
+        }
+
+        return null;
+    }
+
+    /**
+     * Send a login-page error to the client and end the request.
+     */
+    private function login_error($label)
+    {
+        $this->rc->output->command('passkeys_login_error', $this->gettext($label));
         $this->rc->output->send();
     }
 
@@ -583,6 +866,23 @@ class passkeys extends rcube_plugin
         $seed = $this->rc->config->get('passkeys_prf_salt', 'roundcube-passkeys-prf-v1');
 
         return hash('sha256', (string) $seed, true);
+    }
+
+    /**
+     * The signature counter of a verified assertion (authenticator data bytes
+     * 33-36), never below the stored one. Authenticators without a counter
+     * always report 0; lbuchs/webauthn already rejects a real regression.
+     */
+    private static function sign_count($auth_data, array $cred)
+    {
+        $counter = (int) $cred['sign_count'];
+
+        if (strlen($auth_data) >= 37) {
+            $unpacked = unpack('N', substr($auth_data, 33, 4));
+            $counter = max($counter, (int) ($unpacked[1] ?? 0));
+        }
+
+        return $counter;
     }
 
     /**

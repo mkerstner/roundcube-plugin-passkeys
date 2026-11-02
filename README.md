@@ -23,10 +23,49 @@ keeps only ciphertext it cannot decrypt on its own. At login the passkey
 unlocks the stored password in the browser, which then completes a normal
 Roundcube login.
 
+When adding a passkey the user types their current password; the server
+checks it against the session and the browser encrypts what was typed. The
+server never sends the session's password to the browser.
+
 Because this relies on the PRF extension, passwordless login requires a
 reasonably modern browser (Chrome/Edge 116+, Safari 18+, recent Firefox) and
-a PRF-capable authenticator. See `passkeys_on_no_prf` in the configuration
-for how unsupported devices are handled.
+a PRF-capable authenticator. Devices without PRF cannot add a passkey (the
+user is told so); their password login is unaffected.
+
+## When the password changes
+
+A passkey holds a copy of the password from the time it was added (or last
+updated), so it stops working when the password changes:
+
+- **Changed with Roundcube's `password` plugin:** all of the user's passkeys
+  are marked "needs update" right away.
+- **Changed elsewhere:** the first passkey sign-in fails at the mail server;
+  the plugin recognizes that the password came from the passkey, marks it
+  "needs update" and explains it on the login page. From then on that passkey
+  is not tried again (each attempt would count towards the account lockout);
+  it fills in the username so the user only types the new password.
+
+After the next password login the user is asked once to update their
+passkeys. *Settings › Passkeys › Update passkey* asks for the current
+password and one touch of the passkey, and stores the new password in place
+of the old one; there is no need to remove and re-add the passkey.
+
+## Security
+
+- **CSRF:** every plugin request must be a POST carrying the session's
+  request token in the `X-Roundcube-Request` header. Core checks this for
+  logged-in requests too, but the login-page endpoints run in the `startup`
+  hook, before any of core's checks.
+- **Brute force:** passkey sign-ins share Roundcube's per-user lockout
+  (`login_rate_limit`) with password logins. A failed assertion counts as a
+  failed login, a locked account's password is not released, and failures
+  are written to the `userlogins` log (`log_logins`) in core's format, so the
+  usual fail2ban filter for Roundcube catches them. Wrong passwords typed
+  when adding or updating a passkey count as well.
+- **Replay and cloning:** each challenge can be used once, and a signature
+  counter that goes backwards (a cloned authenticator) is rejected.
+  Synced passkeys (iCloud Keychain, Google Password Manager) have no counter,
+  so for them the single-use challenge is what stops a replay.
 
 ## Skins
 
@@ -59,7 +98,7 @@ Settings uses core templates and needs no skin work either.
 Run from the Roundcube root:
 
 ```bash
-composer require roundcube/passkeys
+composer require mkerstner/passkeys
 ```
 
 The `roundcube/plugin-installer` (declared as a dependency) then, driven by the
@@ -83,19 +122,25 @@ prefer to create the schema yourself.
 2. Create the database table:
 
    ```bash
-   bin/updatedb.sh --dir=plugins/passkeys/SQL --package=passkeys
+   bin/initdb.sh --dir=plugins/passkeys/SQL
    ```
 
 3. Add `passkeys` to the `plugins` array in `config/config.inc.php`.
 4. (Optional) copy `config.inc.php.dist` to `config.inc.php` and adjust
    `passkeys_rp_id`, `passkeys_require_uv`, etc.
 
-> **Schema versioning note.** The plugin installer seeds the schema with
-> `db_init` (a straight run of `*.initial.sql`) and does *not* write a
-> `passkeys-version` row into the `system` table. Future schema migrations are
-> applied with `bin/updatedb.sh --dir=plugins/passkeys/SQL --package=passkeys`,
-> which is also the recommended way to create the table for a manual install so
-> the version bookkeeping is in place from the start.
+### Upgrading
+
+The plugin installer applies schema changes on `composer update`. For a
+manual installation, after replacing the files run:
+
+```bash
+bin/updatedb.sh --dir=plugins/passkeys/SQL --package=passkeys
+```
+
+Upgrading from 1.0.x adds the `stale` column. 1.0.x did not record a schema
+version, so `updatedb.sh` applies every migration once and records the
+version from then on.
 
 ## Configuration
 
@@ -121,11 +166,36 @@ This plugin is being built in phases:
    since Roundcube short-circuits unauthenticated requests), the wrapped
    password is released, decrypted in the browser, and the standard login form
    is submitted so the normal password/2FA path completes the sign-in.
-5. **Hardening (partial)** — signature-counter regression check and last-used
-   stamping are in place. Still to do: explicit CSRF token checks on the AJAX
-   endpoints, brute-force/lockout integration on the assert path, and a
-   re-enrolment prompt when a stored password becomes stale (IMAP password
-   changed out-of-band).
+5. **Hardening (done)** — CSRF token checks on every endpoint, single-use
+   challenges, signature-counter regression check, Roundcube's account
+   lockout and fail2ban-compatible logging on the passkey sign-in, the
+   password typed (not sent by the server) when adding a passkey, and
+   detection of passkeys holding an old password with an in-place update.
+
+## Development
+
+`dev/` (not part of releases) holds a Docker instance and an end-to-end test:
+
+```bash
+docker compose -f dev/compose.yaml up -d     # http://localhost:8766
+node dev/e2e.mjs
+```
+
+The instance copies a Roundcube checkout (`ROUNDCUBE_DIR`, default
+`../roundcubemail` next to this repository, with `composer install` done and
+`lbuchs/webauthn` in its `vendor/`) without its configuration, uses its own
+SQLite database and a GreenMail server with real password checks, and mounts
+this folder live as `plugins/passkeys`. `PASSKEYS_DEV_SKIN` selects the skin.
+The test speaks HTTP like the browser and plays the authenticator with
+`dev/soft-authenticator.js` (ES256, PRF emulated), which can also replace
+`navigator.credentials` in a page of the dev instance:
+
+```js
+await import('/static.php/plugins/passkeys/dev/soft-authenticator.js');  // or a <script> tag
+PasskeysSoftAuthenticator.install(window);
+```
+
+It does not replace a test with a real browser and authenticator.
 
 ## License
 

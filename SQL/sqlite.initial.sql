@@ -12,8 +12,11 @@ CREATE TABLE passkeys_credentials (
     prf_supported  tinyint NOT NULL DEFAULT 0,
     wrapped_secret text DEFAULT NULL,
     wrap_iv        varchar(32) DEFAULT NULL,
+    stale          smallint NOT NULL DEFAULT 0,
     created        datetime NOT NULL,
     last_used      datetime DEFAULT NULL
 );
 
 CREATE INDEX ix_passkeys_user_id ON passkeys_credentials(user_id);
+
+INSERT INTO system (name, value) VALUES ('passkeys-version', '2026110200');

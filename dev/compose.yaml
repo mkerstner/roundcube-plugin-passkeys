@@ -11,7 +11,7 @@
 #
 # GreenMail runs WITH authentication, so a wrong password fails like on a real
 # server (needed for the lockout and stale-password paths). Test accounts:
-#   alice@example.net / alice-pass        bob@example.net / bob-pass
+#   alice@example.net / alice-pass   bob@example.net / bob-pass   carol@example.net / carol-pass
 # PASSKEYS_DEV_SKIN selects the skin (default elastic; any skin in the checkout).
 #
 # Paths are relative to this file.
@@ -21,7 +21,7 @@ services:
   mailhost:
     image: docker.io/greenmail/standalone
     environment:
-      GREENMAIL_OPTS: '-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=alice:alice-pass@example.net,bob:bob-pass@example.net -Dgreenmail.users.login=email'
+      GREENMAIL_OPTS: '-Dgreenmail.setup.test.all -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.users=alice:alice-pass@example.net,bob:bob-pass@example.net,carol:carol-pass@example.net -Dgreenmail.users.login=email'
 
   webmail:
     image: ghcr.io/roundcube/roundcubemail-testrunner:php8.3

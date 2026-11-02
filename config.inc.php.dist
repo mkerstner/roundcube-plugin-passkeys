@@ -23,22 +23,8 @@ $config['passkeys_rp_id'] = null;
 // and login. Strongly recommended; disables silent/presence-only assertions.
 $config['passkeys_require_uv'] = true;
 
-// Keep the standard username/password login form available alongside the
-// "Sign in with a passkey" button. Strongly recommended so a lost or broken
-// authenticator can never lock a user out. Set to false only if every user
-// is guaranteed a working recovery path by other means.
-$config['passkeys_allow_password_login'] = true;
-
 // WebAuthn ceremony timeout in seconds.
 $config['passkeys_timeout'] = 60;
-
-// What to do when a user's browser/authenticator does not support the PRF
-// (hmac-secret) extension that passwordless login relies on:
-//   'reject'        - refuse enrolment and tell the user their device is not
-//                     supported (keeps the plugin's "passwordless" promise).
-//   'second_factor' - still enrol the credential, but only as an optional
-//                     second factor after password login (no passwordless).
-$config['passkeys_on_no_prf'] = 'reject';
 
 // Salt used to evaluate the WebAuthn PRF (hmac-secret) extension. The actual
 // entropy of the wrapping key comes from the authenticator's per-credential

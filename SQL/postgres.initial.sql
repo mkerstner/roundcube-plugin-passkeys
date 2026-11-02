@@ -12,8 +12,11 @@ CREATE TABLE passkeys_credentials (
     prf_supported  smallint NOT NULL DEFAULT 0,
     wrapped_secret text DEFAULT NULL,
     wrap_iv        varchar(32) DEFAULT NULL,
+    stale          smallint NOT NULL DEFAULT 0,
     created        timestamp with time zone NOT NULL,
     last_used      timestamp with time zone DEFAULT NULL
 );
 
 CREATE INDEX passkeys_user_id_idx ON passkeys_credentials (user_id);
+
+INSERT INTO "system" (name, value) VALUES ('passkeys-version', '2026110200');

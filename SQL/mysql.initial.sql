@@ -11,6 +11,7 @@ CREATE TABLE `passkeys_credentials` (
     `prf_supported`  tinyint(1)       NOT NULL DEFAULT 0,
     `wrapped_secret` text             DEFAULT NULL,
     `wrap_iv`        varchar(32)      DEFAULT NULL,
+    `stale`          tinyint(1)       NOT NULL DEFAULT 0,
     `created`        datetime         NOT NULL,
     `last_used`      datetime         DEFAULT NULL,
     PRIMARY KEY (`credential_id`),
@@ -18,3 +19,5 @@ CREATE TABLE `passkeys_credentials` (
         REFERENCES `users` (`user_id`) ON DELETE CASCADE ON UPDATE CASCADE,
     INDEX `user_passkeys_index` (`user_id`)
 ) ROW_FORMAT=DYNAMIC ENGINE=INNODB CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+
+INSERT INTO `system` (`name`, `value`) VALUES ('passkeys-version', '2026110200');

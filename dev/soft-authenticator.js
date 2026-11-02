@@ -12,7 +12,8 @@
  *
  * Options: origin, store ({load(), save(list)}), prf (default true),
  * prfAtCreate (default true; false = report only "enabled" at create, like
- * authenticators that need a separate get() for the first PRF output).
+ * authenticators that need a separate get() for the first PRF output),
+ * counter (default true; false = no signature counter, always 0).
  */
 (function (root) {
     'use strict';
@@ -166,6 +167,8 @@
         this.store = opts.store || memoryStore();
         this.prf = opts.prf !== false;
         this.prfAtCreate = opts.prfAtCreate !== false;
+        // false: always report 0, like synced passkeys (iCloud, Google)
+        this.counter = opts.counter !== false;
     }
 
     SoftAuthenticator.prototype.credentials = function () {
@@ -272,8 +275,10 @@
             return Promise.reject(err);
         }
 
-        cred.counter++;
-        this.store.save(list);
+        if (this.counter) {
+            cred.counter++;
+            this.store.save(list);
+        }
 
         var clientData = toBytes(JSON.stringify({
             type: 'webauthn.get',
