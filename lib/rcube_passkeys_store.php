@@ -6,8 +6,10 @@
  |                                                                       |
  | Persistence layer for enrolled WebAuthn/FIDO2 credentials.            |
  |                                                                       |
- | Licensed under the GNU General Public License version 3 or           |
- | any later version with exceptions for skins & plugins.               |
+ | Copyright (C) 2026 Matthias Kerstner                                  |
+ |                                                                       |
+ | Licensed under the GNU General Public License version 3 or any later  |
+ | version. See the LICENSE file for details.                            |
  +-----------------------------------------------------------------------+
 */
 
@@ -52,18 +54,6 @@ class rcube_passkeys_store
         }
 
         return $rows;
-    }
-
-    /**
-     * Number of credentials enrolled by the given user.
-     *
-     * @param int $user_id
-     *
-     * @return int
-     */
-    public function count_by_user($user_id)
-    {
-        return count($this->list_by_user($user_id));
     }
 
     /**
@@ -225,27 +215,6 @@ class rcube_passkeys_store
     }
 
     /**
-     * Rename a credential's user-visible label.
-     *
-     * @param int    $user_id
-     * @param string $credential_id
-     * @param string $label
-     *
-     * @return bool
-     */
-    public function rename($user_id, $credential_id, $label)
-    {
-        $result = $this->db->query(
-            "UPDATE {$this->table} SET `label` = ? WHERE `user_id` = ? AND `credential_id` = ?",
-            (string) $label,
-            (int) $user_id,
-            (string) $credential_id
-        );
-
-        return $this->db->affected_rows($result) > 0;
-    }
-
-    /**
      * Delete a credential owned by the given user.
      *
      * @param int    $user_id
@@ -259,23 +228,6 @@ class rcube_passkeys_store
             "DELETE FROM {$this->table} WHERE `user_id` = ? AND `credential_id` = ?",
             (int) $user_id,
             (string) $credential_id
-        );
-
-        return $this->db->affected_rows($result) > 0;
-    }
-
-    /**
-     * Delete every credential owned by the given user.
-     *
-     * @param int $user_id
-     *
-     * @return bool
-     */
-    public function remove_all($user_id)
-    {
-        $result = $this->db->query(
-            "DELETE FROM {$this->table} WHERE `user_id` = ?",
-            (int) $user_id
         );
 
         return $this->db->affected_rows($result) > 0;

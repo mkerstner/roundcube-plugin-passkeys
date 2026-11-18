@@ -34,9 +34,9 @@ $config['passkeys_timeout'] = 60;
 // you have a specific reason to change it.
 $config['passkeys_prf_salt'] = 'roundcube-passkeys-prf-v1';
 
-// Accepted attestation statement formats. The default list matches what the
-// bundled WebAuthn library understands. Restrict this only if you enforce a
-// specific attestation policy.
-$config['passkeys_formats'] = [
-    'none', 'packed', 'tpm', 'android-key', 'android-safetynet', 'apple', 'fido-u2f',
-];
+// Attestation statement formats to accept. The plugin asks browsers for no
+// attestation (it does not check attestation trust), but a browser may still
+// send a statement; it must then be in this list. null accepts every format
+// the bundled WebAuthn library understands: 'none', 'packed', 'tpm',
+// 'android-key', 'android-safetynet', 'apple', 'fido-u2f'.
+$config['passkeys_formats'] = null;

@@ -287,6 +287,7 @@ const enrolled = await enrol(browser, auth, 'e2e key', ALICE[1]);
 check(!!enrolled.data, 'reg-challenge returns creation options', describe(enrolled.challenge));
 check(enrolled.data && !('password' in enrolled.data) && !enrolled.challenge.raw.includes(ALICE[1]), 'the response does not contain the password');
 check(enrolled.data?.args?.publicKey?.authenticatorSelection?.residentKey === 'required', 'discoverable credential requested');
+check(enrolled.data?.args?.publicKey?.attestation === 'none', 'no attestation requested', enrolled.data?.args?.publicKey?.attestation);
 check(!!command(enrolled.register, 'passkeys_add_row'), 'register stores the passkey', describe(enrolled.register));
 page = await browser.settingsList();
 check(page.text.includes('e2e key'), 'settings list shows the passkey');

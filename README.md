@@ -87,7 +87,9 @@ Settings uses core templates and needs no skin work either.
 
 ## Requirements
 
-- Roundcube with PHP >= 8.1 (`ext-openssl`, `ext-mbstring`, `ext-sodium`).
+- Roundcube 1.6 or newer on PHP >= 8.1 with `ext-openssl`. Tested with
+  Roundcube 1.7.5 and 1.7.6 on PHP 8.3 and the PHP 8.6 release candidate.
+  `ext-sodium` is only used to verify Ed25519 passkeys when OpenSSL cannot.
 - The `lbuchs/webauthn` library (installed automatically via Composer).
 - HTTPS — WebAuthn only works over a secure context.
 
@@ -117,8 +119,13 @@ prefer to create the schema yourself.
 
 ### B. Manual installation
 
-1. Drop this directory into `plugins/passkeys/` and run `composer install` at
-   the Roundcube root so `lbuchs/webauthn` is available on the autoloader.
+1. Drop this directory into `plugins/passkeys/` and make `lbuchs/webauthn`
+   available on Roundcube's autoloader, from the Roundcube root:
+
+   ```bash
+   composer require lbuchs/webauthn:^2.2
+   ```
+
 2. Create the database table:
 
    ```bash
@@ -148,30 +155,6 @@ See `config.inc.php.dist` — every option has a safe default, so no
 configuration is strictly required beyond enabling the plugin. The most
 important option in a multi-hostname setup is `passkeys_rp_id`.
 
-## Status / roadmap
-
-This plugin is being built in phases:
-
-1. **Settings management (done)** — a "Passkeys" tab that lists a user's
-   enrolled passkeys and lets them remove one. Database schema and credential
-   store in place.
-2. **Enrolment (done)** — the WebAuthn registration ceremony from the Settings
-   tab: create a discoverable credential, validate the attestation
-   server-side, and persist it.
-3. **PRF wrapping (done)** — at enrolment the IMAP password is encrypted with a
-   key derived from the passkey (WebAuthn PRF/hmac-secret) and stored as
-   `wrapped_secret`; the server never holds a key that can decrypt it.
-4. **Passwordless login (done)** — a "Sign in with a passkey" button on the
-   login page. The assertion is verified server-side (via the `startup` hook,
-   since Roundcube short-circuits unauthenticated requests), the wrapped
-   password is released, decrypted in the browser, and the standard login form
-   is submitted so the normal password/2FA path completes the sign-in.
-5. **Hardening (done)** — CSRF token checks on every endpoint, single-use
-   challenges, signature-counter regression check, Roundcube's account
-   lockout and fail2ban-compatible logging on the passkey sign-in, the
-   password typed (not sent by the server) when adding a passkey, and
-   detection of passkeys holding an old password with an in-place update.
-
 ## Development
 
 `dev/` (not part of releases) holds a Docker instance and an end-to-end test:
@@ -199,4 +182,5 @@ It does not replace a test with a real browser and authenticator.
 
 ## License
 
-GPL-3.0-or-later.
+GNU General Public License version 3 or any later version
+(GPL-3.0-or-later), see [LICENSE](LICENSE).

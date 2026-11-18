@@ -9,8 +9,10 @@
  | standard username/password login or any 2FA plugin: a user with no    |
  | enrolled passkey sees the unchanged login experience.                 |
  |                                                                       |
- | Licensed under the GNU General Public License version 3 or           |
- | any later version with exceptions for skins & plugins.               |
+ | Copyright (C) 2026 Matthias Kerstner                                  |
+ |                                                                       |
+ | Licensed under the GNU General Public License version 3 or any later  |
+ | version. See the LICENSE file for details.                            |
  +-----------------------------------------------------------------------+
 */
 
@@ -44,7 +46,7 @@ class passkeys extends rcube_plugin
     /** @var rcube_passkeys_store */
     private $store;
 
-    /** @var array|null The verified passkey sign-in this login request completes */
+    /** @var array{credential: string, user: string, time: int}|null The verified passkey sign-in this login request completes */
     private $passkey_login;
 
     #[\Override]
@@ -83,7 +85,6 @@ class passkeys extends rcube_plugin
             $this->register_action('plugin.passkeys.update-challenge', [$this, 'action_update_challenge']);
             $this->register_action('plugin.passkeys.update', [$this, 'action_update']);
             $this->register_action('plugin.passkeys.remove', [$this, 'action_remove']);
-            $this->register_action('plugin.passkeys.rename', [$this, 'action_rename']);
 
             $this->include_script('passkeys.js');
             // Skin-independent stylesheet (works on any skin, not just elastic).
@@ -150,7 +151,7 @@ class passkeys extends rcube_plugin
         // "──── or sign in using passkeys ────"
         $content['buttons']['passkeys_sep'] = [
             'outterclass' => 'passkeys-separator',
-            'content' => html::tag('span', null, rcube::Q($this->gettext('orsigninwithpasskey'))),
+            'content' => html::tag('span', [], rcube::Q($this->gettext('orsigninwithpasskey'))),
         ];
 
         $content['buttons']['passkeys_login'] = [
@@ -385,6 +386,11 @@ class passkeys extends rcube_plugin
             $this->rc->output->show_message($this->gettext('passkeyadderror'), 'error');
             $this->rc->output->send();
         }
+
+        // Ask for no attestation: the plugin does not check attestation trust
+        // (no root certificates), so a statement would only reveal the device
+        // model and add formats that can fail to verify.
+        $args->publicKey->attestation = 'none';
 
         // Remember the challenge to validate the response against. Stored
         // base64url-encoded so it survives Roundcube's text-based session store.
@@ -703,27 +709,6 @@ class passkeys extends rcube_plugin
     }
 
     /**
-     * AJAX: rename one of the current user's passkeys.
-     */
-    public function action_rename()
-    {
-        $this->check_request();
-
-        $user_id = (int) $this->rc->user->ID;
-        $cred_id = rcube_utils::get_input_string('_credential_id', rcube_utils::INPUT_POST);
-        $label = trim(rcube_utils::get_input_string('_label', rcube_utils::INPUT_POST));
-
-        if ($cred_id !== '' && $label !== '' && $this->store->rename($user_id, $cred_id, $label)) {
-            $this->rc->output->command('passkeys_rename_row', ['id' => $cred_id, 'label' => $label]);
-            $this->rc->output->show_message($this->gettext('successfullysaved'), 'confirmation');
-        } else {
-            $this->rc->output->show_message($this->gettext('passkeyrenameerror'), 'error');
-        }
-
-        $this->rc->output->send();
-    }
-
-    /**
      * CSRF protection for the plugin's AJAX endpoints: a POST carrying the
      * session's request token in the X-Roundcube-Request header, which
      * rcmail.http_post() always sends and a cross-site page cannot set. Core
@@ -781,7 +766,17 @@ class passkeys extends rcube_plugin
         $posted = rcube_utils::get_input_string('_passkeys_credential', rcube_utils::INPUT_POST);
         $user = trim(rcube_utils::get_input_string('_user', rcube_utils::INPUT_POST));
 
-        if (is_array($marker) && $posted !== '' && hash_equals($marker['credential'], $posted)
+        if (!is_array($marker) || !isset($marker['credential'], $marker['user'], $marker['time'])) {
+            return null;
+        }
+
+        $marker = [
+            'credential' => (string) $marker['credential'],
+            'user' => (string) $marker['user'],
+            'time' => (int) $marker['time'],
+        ];
+
+        if ($posted !== '' && hash_equals($marker['credential'], $posted)
             && $user === $marker['user'] && time() - $marker['time'] < 300
         ) {
             return $marker;
@@ -812,7 +807,10 @@ class passkeys extends rcube_plugin
             return null;
         }
 
-        $formats = (array) $this->rc->config->get('passkeys_formats', ['none', 'packed', 'apple', 'fido-u2f']);
+        // Formats accepted when a browser sends an attestation statement anyway;
+        // null = all the library understands (an empty list would be rejected).
+        $formats = $this->rc->config->get('passkeys_formats');
+        $formats = $formats ? (array) $formats : null;
 
         try {
             // 4th argument enables base64url encoding of the outgoing ByteBuffer
